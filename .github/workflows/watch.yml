@@ -2,12 +2,24 @@ name: Cinema City Ticket Watch
 
 on:
   schedule:
+    # Alle 5 Minuten (kürzeste von GitHub erlaubte Taktung). GitHub
+    # garantiert keine exakte Pünktlichkeit - bei hoher Auslastung kann es
+    # ein paar Minuten Verzögerung geben.
     - cron: "*/5 * * * *"
-  workflow_dispatch: {}
+  # Erlaubt manuelles Auslösen über den "Run workflow"-Button, inkl. Testmodus.
+  workflow_dispatch:
+    inputs:
+      test_alert:
+        description: "Alarm testweise auslösen (Fake-Daten, ignoriert echten Zustand)"
+        type: boolean
+        default: false
 
+# Nötig, damit der Workflow die state-Datei zurück ins Repo committen darf.
 permissions:
   contents: write
 
+# Verhindert, dass sich zwei Läufe überlappen und sich gegenseitig beim
+# Commit ins Gehege kommen.
 concurrency:
   group: cinema-watch
   cancel-in-progress: false
@@ -17,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Code auschecken
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Python einrichten
         uses: actions/setup-python@v5
@@ -30,6 +42,7 @@ jobs:
       - name: Watcher ausführen
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          TEST_ALERT: ${{ inputs.test_alert }}
         run: python watch.py
 
       - name: Aktualisierten Zustand zurück committen
