@@ -7,11 +7,18 @@ sitzt, gibt es keinen Sound/Popup/Browser mehr - stattdessen wird bei einem
 Treffer eine Push-Benachrichtigung übers Handy verschickt (ntfy.sh, wie
 bisher).
 
-Der erkannte Zustand (welche Tage schon bekannt sind) wird in
-state/seen.json gespeichert. Die GitHub Action committet diese Datei nach
-jedem Lauf automatisch zurück ins Repo - so "merkt" sich das System den
-Stand auch zwischen den einzelnen Cloud-Ausführungen, obwohl jeder Lauf auf
-einer frischen, leeren virtuellen Maschine startet.
+WICHTIG zur Funktionsweise: Statt allgemein zu prüfen, ob "irgendein neuer
+Tag" beim Kino freigeschaltet wurde (das würde fälschlich schon auslösen,
+sobald IRGENDEIN Film an dem Tag läuft), wird HIER GEZIELT und AUSSCHLIESSLICH
+für die paar Zieltage geprüft, ob eine passende Odyssea-IMAX-70mm-Vorstellung
+existiert. Das ist präziser, weil normale Vorstellungen oft schon Wochen im
+Voraus im Kalender auftauchen, bevor die gewünschte 70mm-Vorstellung selbst
+freigeschaltet wird.
+
+Der erkannte Zustand (welche konkreten Vorstellungen schon bekannt sind)
+wird in state/seen.json gespeichert. Die GitHub Action committet diese Datei
+nach jedem Lauf automatisch zurück ins Repo - so "merkt" sich das System den
+Stand auch zwischen den einzelnen Cloud-Ausführungen.
 """
 
 import json
@@ -29,10 +36,8 @@ CINEMA_NAME = "Flora"
 
 REQUIRED_ATTR = "70-mm"      # nur IMAX-70mm-Vorstellungen zählen
 
-TARGET_DATE_START = "2026-09-18"
+TARGET_DATE_START = "2026-09-25"
 TARGET_DATE_END = "2026-09-27"
-
-HORIZON_DAYS = 30
 
 STATE_FILE = "state/seen.json"
 
@@ -56,6 +61,17 @@ HEADERS = {
 }
 
 
+def target_dates():
+    start = datetime.strptime(TARGET_DATE_START, "%Y-%m-%d")
+    end = datetime.strptime(TARGET_DATE_END, "%Y-%m-%d")
+    days = []
+    d = start
+    while d <= end:
+        days.append(d.strftime("%Y-%m-%d"))
+        d += timedelta(days=1)
+    return days
+
+
 def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r", encoding="utf-8") as f:
@@ -63,18 +79,10 @@ def load_state():
     return set()
 
 
-def save_state(dates):
+def save_state(event_keys):
     os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
     with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(sorted(dates), f, ensure_ascii=False, indent=2)
-
-
-def get_open_dates():
-    until = (datetime.now() + timedelta(days=HORIZON_DAYS)).strftime("%Y-%m-%d")
-    url = f"{API_BASE}/dates/in-cinema/{CINEMA_ID}/until/{until}?attr=&lang={LANG}"
-    response = requests.get(url, headers=HEADERS, timeout=20)
-    response.raise_for_status()
-    return set(response.json().get("body", {}).get("dates", []))
+        json.dump(sorted(event_keys), f, ensure_ascii=False, indent=2)
 
 
 def get_film_events(date):
@@ -82,6 +90,22 @@ def get_film_events(date):
     response = requests.get(url, headers=HEADERS, timeout=20)
     response.raise_for_status()
     return response.json().get("body", {}).get("events", [])
+
+
+def event_key(date, e):
+    """Eindeutiger Schlüssel für eine konkrete Vorstellung (Datum+Uhrzeit+Saal)."""
+    return f"{date}_{e.get('eventDateTime', '')}_{e.get('auditorium', '')}"
+
+
+def get_matching_events():
+    """Holt alle aktuell existierenden Odyssea-70mm-Vorstellungen in den Zieltagen."""
+    found = {}
+    for date in target_dates():
+        events = get_film_events(date)
+        for e in events:
+            if e.get("filmId") == FILM_ID and REQUIRED_ATTR in e.get("attributeIds", []):
+                found[event_key(date, e)] = (date, e)
+    return found
 
 
 def send_phone_push(title, message, url):
@@ -106,60 +130,45 @@ def send_phone_push(title, message, url):
         print(f"⚠️  ntfy-Push fehlgeschlagen: {e}")
 
 
-def alert(date, events):
-    showtimes = []
-    for e in events:
-        t = e.get("eventDateTime", "")
-        time_part = t.split("T")[1][:5] if "T" in t else t
-        hall = e.get("auditorium", "")
-        sold_out = " (AUSVERKAUFT)" if e.get("soldOut") else ""
-        showtimes.append(f"{time_part} Uhr – Saal {hall}{sold_out}")
+def alert(date, e):
+    t = e.get("eventDateTime", "")
+    time_part = t.split("T")[1][:5] if "T" in t else t
+    hall = e.get("auditorium", "")
+    sold_out = " (AUSVERKAUFT)" if e.get("soldOut") else ""
+    showtime = f"{time_part} Uhr – Saal {hall}{sold_out}"
 
-    print(f"🚨 ODYSSEA IMAX 70MM VERFÜGBAR: {date} 🚨")
-    for s in showtimes:
-        print(f"    {s}")
+    print(f"🚨 ODYSSEA IMAX 70MM VERFÜGBAR: {date}, {showtime} 🚨")
 
     booking_url = f"https://www.cinemacity.cz/films/film/{FILM_ID}"
     send_phone_push(
         title="🎟️ Odyssea IMAX 70mm verfügbar!",
-        message=f"Flora, {date}:\n" + "\n".join(showtimes),
+        message=f"Flora, {date}:\n{showtime}",
         url=booking_url,
     )
 
 
 def main():
-    known_dates = load_state()
+    print(f"Beobachte Zieltage: {', '.join(target_dates())}")
+    known_keys = load_state()
 
-    if not known_dates:
+    if not known_keys:
         # Erster Lauf überhaupt: NUR Ausgangszustand speichern, kein Alarm.
-        # (Sonst würden alle bereits länger verfügbaren Tage fälschlich
-        # als "neu" gewertet.)
-        current_dates = get_open_dates()
-        save_state(current_dates)
-        print(f"Erststart: {len(current_dates)} bereits bekannte Tage gespeichert (kein Alarm).")
+        current = get_matching_events()
+        save_state(set(current.keys()))
+        print(f"Erststart: {len(current)} bereits bekannte passende Vorstellung(en) gespeichert (kein Alarm).")
         return
 
-    current_dates = get_open_dates()
-    new_dates = current_dates - known_dates
+    current = get_matching_events()
+    new_keys = set(current.keys()) - known_keys
 
-    relevant_new_dates = sorted(d for d in new_dates if TARGET_DATE_START <= d <= TARGET_DATE_END)
-    ignored_new_dates = sorted(new_dates - set(relevant_new_dates))
+    for key in sorted(new_keys):
+        date, e = current[key]
+        alert(date, e)
 
-    for date in relevant_new_dates:
-        events = get_film_events(date)
-        matching = [
-            e for e in events
-            if e.get("filmId") == FILM_ID and REQUIRED_ATTR in e.get("attributeIds", [])
-        ]
-        if matching:
-            alert(date, matching)
-        else:
-            print(f"Neuer Tag {date} freigeschaltet (im Zielzeitraum), aber keine passende Vorstellung dabei.")
+    if not new_keys:
+        print("Keine neuen passenden Vorstellungen.")
 
-    if ignored_new_dates:
-        print(f"{len(ignored_new_dates)} neue(r) Tag(e) außerhalb Zielzeitraum ignoriert: {', '.join(ignored_new_dates)}")
-
-    save_state(current_dates)
+    save_state(set(current.keys()))
     print("Check abgeschlossen.")
 
 
