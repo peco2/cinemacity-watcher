@@ -148,6 +148,15 @@ def alert(date, e):
 
 
 def main():
+    # Testmodus: löst einen Fake-Alarm aus, unabhängig von echten Daten.
+    # Wird über den 'Run workflow'-Dialog aktiviert (Checkbox "Alarm testweise auslösen").
+    if os.environ.get("TEST_ALERT") == "true":
+        print("🧪 TEST-MODUS: Sende Fake-Alarm, um die Kette zu prüfen...")
+        fake_event = {"eventDateTime": "2026-09-26T18:30:00", "auditorium": "IMAX VOLVO", "soldOut": False}
+        alert("2026-09-26", fake_event)
+        print("Test-Alarm verschickt. (Kein Einfluss auf state/seen.json.)")
+        return
+
     print(f"Beobachte Zieltage: {', '.join(target_dates())}")
     known_keys = load_state()
 
